@@ -31,6 +31,7 @@
       HDR (radiance rgbE format)
       PIC (Softimage PIC)
       PNM (PPM and PGM binary only)
+      ICO (cur and ico)
 
       Animated GIF still needs a proper API, but here's one way to do it:
           http://gist.github.com/urraka/685d9a6340b26b830d49
@@ -338,6 +339,7 @@ RECENT REVISION HISTORY:
 //        STBI_NO_HDR
 //        STBI_NO_PIC
 //        STBI_NO_PNM   (.ppm and .pgm)
+//        STBI_NO_ICO   (.ico and .cur)
 //
 //  - You can request *only* certain decoders and suppress all other ones
 //    (this will be more forward-compatible, as addition of new decoders
@@ -352,6 +354,7 @@ RECENT REVISION HISTORY:
 //        STBI_ONLY_HDR
 //        STBI_ONLY_PIC
 //        STBI_ONLY_PNM   (.ppm and .pgm)
+//        STBI_ONLY_ICO   (.ico and .cur)
 //
 //   - If you use STBI_NO_PNG (or _ONLY_ without PNG), and you still
 //     want the zlib decoder to be available, #define STBI_SUPPORT_ZLIB
@@ -547,7 +550,7 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
 #if defined(STBI_ONLY_JPEG) || defined(STBI_ONLY_PNG) || defined(STBI_ONLY_BMP) \
   || defined(STBI_ONLY_TGA) || defined(STBI_ONLY_GIF) || defined(STBI_ONLY_PSD) \
   || defined(STBI_ONLY_HDR) || defined(STBI_ONLY_PIC) || defined(STBI_ONLY_PNM) \
-  || defined(STBI_ONLY_ZLIB)
+  || defined(STBI_ONLY_ICO) || defined(STBI_ONLY_ZLIB)
    #ifndef STBI_ONLY_JPEG
    #define STBI_NO_JPEG
    #endif
@@ -575,12 +578,19 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
    #ifndef STBI_ONLY_PNM
    #define STBI_NO_PNM
    #endif
+   #ifndef STBI_ONLY_ICO
+   #define STBI_NO_ICO
+   #endif
 #endif
 
 #if defined(STBI_NO_PNG) && !defined(STBI_SUPPORT_ZLIB) && !defined(STBI_NO_ZLIB)
 #define STBI_NO_ZLIB
 #endif
 
+#ifndef STBI_NO_ICO // PNG and BMP are required for ico file support
+#undef STBI_NO_PNG
+#undef STBI_NO_BMP
+#endif
 
 #include <stdarg.h>
 #include <stddef.h> // ptrdiff_t on osx
@@ -961,6 +971,11 @@ static int      stbi__pnm_info(stbi__context *s, int *x, int *y, int *comp);
 static int      stbi__pnm_is16(stbi__context *s);
 #endif
 
+#ifndef STBI_NO_ICO
+static int     stbi__ico_test(stbi__context *s);
+static void   *stbi__ico_load(stbi__context *s, int *x, int *y, int *comp, int req_comp, stbi__result_info *ri);
+#endif
+
 static
 #ifdef STBI_THREAD_LOCAL
 STBI_THREAD_LOCAL
@@ -1174,6 +1189,10 @@ static void *stbi__load_main(stbi__context *s, int *x, int *y, int *comp, int re
       float *hdr = stbi__hdr_load(s, x,y,comp,req_comp, ri);
       return stbi__hdr_to_ldr(hdr, *x, *y, req_comp ? req_comp : *comp);
    }
+   #endif
+
+   #ifndef STBI_NO_ICO
+   if (stbi__ico_test(s))  return stbi__ico_load(s,x,y,comp,req_comp, ri);
    #endif
 
    #ifndef STBI_NO_TGA
@@ -5446,13 +5465,7 @@ static int stbi__bmp_set_mask_defaults(stbi__bmp_data *info, int compress)
 
 static void *stbi__bmp_parse_header(stbi__context *s, stbi__bmp_data *info)
 {
-   int hsz;
-   if (stbi__get8(s) != 'B' || stbi__get8(s) != 'M') return stbi__errpuc("not BMP", "Corrupt BMP");
-   stbi__get32le(s); // discard filesize
-   stbi__get16le(s); // discard reserved
-   stbi__get16le(s); // discard reserved
-   info->offset = stbi__get32le(s);
-   info->hsz = hsz = stbi__get32le(s);
+   int hsz = info->hsz;
    info->mr = info->mg = info->mb = info->ma = 0;
    info->extra_read = 14;
 
@@ -5526,8 +5539,7 @@ static void *stbi__bmp_parse_header(stbi__context *s, stbi__bmp_data *info)
    return (void *) 1;
 }
 
-
-static void *stbi__bmp_load(stbi__context *s, int *x, int *y, int *comp, int req_comp, stbi__result_info *ri)
+static void *stbi__parse_bmp_data(stbi__context *s, int *x, int *y, int *comp, int req_comp, int offset, int hsz)
 {
    stbi_uc *out;
    unsigned int mr=0,mg=0,mb=0,ma=0, all_a;
@@ -5535,9 +5547,10 @@ static void *stbi__bmp_load(stbi__context *s, int *x, int *y, int *comp, int req
    int psize=0,i,j,width;
    int flip_vertically, pad, target;
    stbi__bmp_data info;
-   STBI_NOTUSED(ri);
 
    info.all_a = 255;
+   info.offset = offset;
+   info.hsz = hsz;
    if (stbi__bmp_parse_header(s, &info) == NULL)
       return NULL; // error code already set
 
@@ -5560,7 +5573,7 @@ static void *stbi__bmp_load(stbi__context *s, int *x, int *y, int *comp, int req
       if (info.bpp < 16)
          psize = (info.offset - info.extra_read - info.hsz) >> 2;
    }
-   if (psize == 0) {
+   if (psize == 0 && false) {
       // accept some number of extra bytes after the header, but if the offset points either to before
       // the header ends or implies a large amount of extra data, reject the file as malformed
       int bytes_read_so_far = s->callback_already_read + (int)(s->img_buffer - s->img_buffer_original);
@@ -5728,6 +5741,82 @@ static void *stbi__bmp_load(stbi__context *s, int *x, int *y, int *comp, int req
    *y = s->img_y;
    if (comp) *comp = s->img_n;
    return out;
+}
+
+static void *stbi__bmp_load(stbi__context *s, int *x, int *y, int *comp, int req_comp, stbi__result_info *ri)
+{
+   STBI_NOTUSED(ri);
+
+   if (stbi__get8(s) != 'B' || stbi__get8(s) != 'M') return stbi__errpuc("not BMP", "Corrupt BMP");
+   stbi__get32le(s); // discard filesize
+   stbi__get16le(s); // discard reserved
+   stbi__get16le(s); // discard reserved
+   int offset = stbi__get32le(s);
+   int hsz = stbi__get32le(s);
+
+   return stbi__parse_bmp_data(s, x, y, comp, req_comp, offset, hsz);
+
+}
+#endif
+
+#ifndef STBI_NO_ICO
+static int stbi__ico_test(stbi__context *s)
+{
+   int res = 0;
+   int type, num_images, tmp, bpp;
+   if(stbi__get16le(s) != 0) goto errorEnd;
+   type = stbi__get16le(s);
+   if(type != 1 && type != 2) goto errorEnd; // type: 1=icon 2=cursor
+   num_images = stbi__get16le(s);
+   if(num_images < 1) goto errorEnd;
+   stbi__skip(s, 3); // skip width, height and color palette - 0 when no palette
+   tmp = stbi__get8(s);
+   if(tmp != 0 && tmp != 255) goto errorEnd; // should be 0 but .NET exporter seems to set this to 255
+   if(type == 1) { // icon type
+      tmp = stbi__get16le(s);
+      if(tmp != 1 && tmp != 2) goto errorEnd;
+      bpp = stbi__get16le(s);
+      if ( (bpp != 8) && (bpp != 16) && (bpp != 24) && (bpp != 32) ) goto errorEnd;
+   }
+   res = 1; // if we got this far, everything's good and we can return 1 instead of 0
+
+errorEnd:
+   stbi__rewind(s);
+   return res;
+}
+
+static void *stbi__ico_load(stbi__context *s, int *x, int *y, int *comp, int req_comp, stbi__result_info *ri)
+{
+   int type;
+   stbi_uc *out;
+   if(stbi__get16le(s) != 0) return stbi__errpuc("not ICO", "Corrupt ICO");
+   type = stbi__get16le(s); // type: 1=icon 2=cursor
+   if(type != 1 && type != 2) return stbi__errpuc("not ICO", "Corrupt ICO");
+   stbi__get16le(s); // num images
+   s->img_x = stbi__get8(s);
+   s->img_y = stbi__get8(s);
+   // size of 0 defaults to 256
+   if(s->img_x == 0) s->img_x = 256;
+   if(s->img_y == 0) s->img_y = 256;
+   int num_pallete_entries = stbi__get16le(s);
+   if(num_pallete_entries == 1) return stbi__errpuc("not ICO", "Corrupt ICO");
+   int planes = stbi__get16le(s);
+   if(planes > 1) return stbi__errpuc("not ICO", "Corrupt ICO");
+   int bpp = stbi__get16le(s);
+   stbi__get32le(s); // discard size
+   int offset = stbi__get32le(s);
+   stbi__skip(s, offset - 22);
+   int hsz = stbi__get32le(s);
+   if(hsz != 0x474e5089) {
+      // an embedded bmp file must exclude BITMAPFILEHEADER so we have to parse it after that
+      // TODO: Upper half of the bmp contains some kind of mask data
+      return stbi__parse_bmp_data(s, x, y, comp, req_comp, num_pallete_entries * 4 + 14 + hsz, hsz);
+   } else {
+      stbi__rewind(s);
+      stbi__skip(s, offset);
+      return stbi__png_load(s, x, y, comp, req_comp, ri);
+   }
+   
 }
 #endif
 
